@@ -1,13 +1,11 @@
 package boltdb
 
 import (
+	"encoding/binary"
 	"fmt"
-	"reflect"
-	"strconv"
 	"sync"
 
 	"github.com/boltdb/bolt"
-	gogoproto "github.com/gogo/protobuf/proto"
 	"github.com/golang/protobuf/proto"
 )
 
@@ -53,35 +51,19 @@ func (provider *BoltProvider) GetSnapshot(actorName string) (snapshot interface{
 			found = false
 			return nil
 		}
-		ei, err := strconv.Atoi(string(eb))
-		if err != nil {
-			return fmt.Errorf("%v", err)
-		}
-		eventIndex = ei
+		eventIndex = decodeInt(eb)
 
-		//Get snapshot event type; set found false if `st` does not exist
-		tb := b.Get([]byte("st"))
-		if tb == nil {
-			found = false
-			return nil
-		}
-		ts := string(tb)
-		protoType := gogoproto.MessageType(ts)
-		if protoType == nil {
-			return fmt.Errorf("unknown message type %s for snapshot %s: %v", ts, actorName, protoType)
-		}
-		t := protoType.Elem()
-		intPtr := reflect.New(t)
-		instance := intPtr.Interface().(gogoproto.Message)
-
-		//Get snapshot data;
-		sb := b.Get([]byte("sd"))
-		if sb == nil {
+		//Get snapshot; set found false if `sd` does not exist
+		sd := b.Get([]byte("sd"))
+		if sd == nil {
 			snapshot = nil
 			return nil
 		}
 
-		proto.Unmarshal(sb, instance)
+		instance, err := cUnmarshal(sd)
+		if err != nil {
+			return err
+		}
 		snapshot = instance
 
 		return nil
@@ -95,12 +77,9 @@ func (provider *BoltProvider) GetSnapshot(actorName string) (snapshot interface{
 
 //PersistSnapshot saves snapshot and event index
 func (provider *BoltProvider) PersistSnapshot(actorName string, eventIndex int, snapshot proto.Message) {
-	typeName := gogoproto.MessageName(snapshot)
-	bs, err := gogoproto.Marshal(snapshot)
-	eis := strconv.Itoa(eventIndex)
-
+	c, err := cMarshal(snapshot)
 	if err != nil {
-		panic(fmt.Errorf("failed to marshal snapshot:%v", err))
+		panic(err)
 	}
 
 	err = provider.db.Update(func(tx *bolt.Tx) error {
@@ -110,15 +89,12 @@ func (provider *BoltProvider) PersistSnapshot(actorName string, eventIndex int, 
 			return fmt.Errorf("failed to create bucket %s: %v", actorName, err)
 		}
 
-		err = b.Put([]byte("se"), []byte(eis))
+		err = b.Put([]byte("se"), encodeInt(eventIndex))
 		if err != nil {
 			return err
 		}
-		err = b.Put([]byte("st"), []byte(typeName))
-		if err != nil {
-			return err
-		}
-		err = b.Put([]byte("sd"), bs)
+
+		err = b.Put([]byte("sd"), c)
 		if err != nil {
 			return err
 		}
@@ -126,20 +102,89 @@ func (provider *BoltProvider) PersistSnapshot(actorName string, eventIndex int, 
 		return nil
 	})
 	if err != nil {
-		panic(fmt.Errorf("failed to persist snapshot %d for %s: %v", eventIndex, actorName, err))
+		panic(err)
 	}
+
 }
 
 //GetEvents execute callback for each event in store for actor after event index
 func (provider *BoltProvider) GetEvents(actorName string, eventIndexStart int, callback func(e interface{})) {
+	events := []proto.Message{}
 
+	err := provider.db.View(func(tx *bolt.Tx) error {
+		//Get or create actor bucket
+		b := tx.Bucket([]byte(actorName))
+		if b == nil {
+			return nil
+		}
+
+		//Get events bucket
+		e := b.Bucket([]byte("events"))
+		if e == nil {
+			return nil
+		}
+
+		//get events after index
+		c := e.Cursor()
+		for k, v := c.Seek(encodeInt(eventIndexStart)); k != nil; k, v = c.Next() {
+			event, err := cUnmarshal(v)
+			if err != nil {
+				panic(err)
+			}
+			events = append(events, event)
+		}
+
+		return nil
+	})
+	if err != nil {
+		panic(fmt.Errorf("failed to read events for %s: %v", actorName, err))
+	}
+
+	for _, event := range events {
+
+		callback(event)
+	}
 }
 
 //PersistEvent save event into the store
 func (provider *BoltProvider) PersistEvent(actorName string, eventIndex int, event proto.Message) {
+	c, err := cMarshal(event)
+	if err != nil {
+		panic(err)
+	}
+
+	err = provider.db.Update(func(tx *bolt.Tx) error {
+
+		b, err := tx.CreateBucketIfNotExists([]byte(actorName))
+		if err != nil {
+			return fmt.Errorf("failed to create bucket %s: %v", actorName, err)
+		}
+
+		e, err := b.CreateBucketIfNotExists([]byte("events"))
+		if err != nil {
+			return fmt.Errorf("failed to create events bucket %s: %v", actorName, err)
+		}
+
+		err = e.Put(encodeInt(eventIndex), c)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
 
 }
 
-type Marshalable interface {
-	Marshal() ([]byte, error)
+func encodeInt(i int) []byte {
+	v := uint32(i)
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, v)
+	return buf
+}
+
+func decodeInt(b []byte) int {
+	x := binary.BigEndian.Uint32(b)
+	return int(x)
 }

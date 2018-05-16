@@ -16,9 +16,10 @@ import (
 const ActorName = "test.actor"
 
 type dataStore struct {
-	providerState persistence.ProviderState
-	db            *bolt.DB
-	tpath         string
+	providerState    persistence.ProviderState
+	db               *bolt.DB
+	tpath            string
+	snapshotInterval int
 }
 
 func (p *dataStore) GetState() persistence.ProviderState {
@@ -34,6 +35,7 @@ func (d *dataStore) Close() error {
 // it adds one event to set state for every sting passed in
 // set the last snapshot to given index of those events
 func initData(t *testing.T, c int, snapshotInterval, lastSnapshot int, states ...string) *dataStore {
+	actorName := fmt.Sprintf("%s.%d", ActorName, c)
 	tpath := tempfile()
 	db, err := bolt.Open(tpath, 0666, nil)
 	if err != nil {
@@ -42,18 +44,18 @@ func initData(t *testing.T, c int, snapshotInterval, lastSnapshot int, states ..
 	// add all events
 	state := boltdb.NewBoltProvider(snapshotInterval, db)
 	for i, s := range states {
-		state.PersistEvent(ActorName, i, &Event{State: s})
+		state.PersistEvent(actorName, i, &Event{State: s})
 		t.Logf("case %d - init event %v", c, &Event{State: s})
 	}
 	// mark one as a snapshot
 	if lastSnapshot < len(states) {
 		snapshot := states[lastSnapshot]
 		state.PersistSnapshot(
-			ActorName, lastSnapshot, &Snapshot{State: snapshot},
+			actorName, lastSnapshot, &Snapshot{State: snapshot},
 		)
 		t.Logf("case %d - init snap %d %v", c, lastSnapshot, &Snapshot{State: snapshot})
 	}
-	return &dataStore{providerState: state, db: db, tpath: tpath}
+	return &dataStore{providerState: state, db: db, tpath: tpath, snapshotInterval: snapshotInterval}
 }
 
 type myActor struct {
@@ -89,10 +91,12 @@ func (a *myActor) Receive(ctx actor.Context) {
 		// Persist all events received outside of recovery
 		if !a.Recovering() {
 			a.PersistReceive(msg)
+			a.t.Logf("%s-%s even %v", ctx.Self().Id, mod, msg)
+		} else {
+			a.t.Logf("%s-%s reco %v", ctx.Self().Id, mod, msg)
 		}
 		// Set state to whatever message says
 		a.state = msg.State
-		a.t.Logf("%s-%s even %v", ctx.Self().Id, mod, msg)
 	case *Query:
 		queryState[ctx.Self().Id] = a.state
 		queryWg.Done()
@@ -101,7 +105,7 @@ func (a *myActor) Receive(ctx actor.Context) {
 
 type Query struct{}
 
-func TestSnapshotting(t *testing.T) {
+func TestBoltProvider(t *testing.T) {
 	cases := []struct {
 		init      *dataStore
 		msgs      []string
@@ -148,8 +152,26 @@ func TestSnapshotting(t *testing.T) {
 
 			// wait for shutdown
 			pid.GracefulPoison()
+			//close bolt db, but don't delete it
+			tc.init.db.Close()
 
+			//respawn actor with new bolt db provider and db instance
 			mod = "resp"
+			db, err := bolt.Open(tc.init.tpath, 0666, nil)
+			if err != nil {
+				t.Fatalf("failed to open db: %v", err)
+			}
+			// add all events
+			state := boltdb.NewBoltProvider(tc.init.snapshotInterval, db)
+			ds := &dataStore{providerState: state, db: db, tpath: tc.init.tpath}
+
+			props = actor.FromProducer(makeActor(t)).
+				WithMiddleware(persistence.Using(ds))
+
+			if err != nil {
+				t.Fatalf("failed to reopen db: %v", err)
+			}
+
 			pid, err = actor.SpawnNamed(props, actorName)
 			noError(t, "respawn actor", err)
 
