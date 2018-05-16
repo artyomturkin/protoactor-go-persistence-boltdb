@@ -1,0 +1,12 @@
+syntax = "proto3";
+package boltdb_test;
+option csharp_namespace = "boltdb_test";
+
+
+message Event {
+    string state = 1;
+}
+
+message Snapshot {
+    string state = 1;
+}
