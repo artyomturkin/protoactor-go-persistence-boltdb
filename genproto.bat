@@ -1,0 +1,1 @@
+protoc --gogoslick_out=. test.proto
