@@ -1,38 +1,17 @@
-# Proto Actor [Go] - BoltDB persistence provider
+package boltdb_test
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/artyomturkin/protoactor-go-persistence-boltdb)](https://goreportcard.com/report/github.com/artyomturkin/protoactor-go-persistence-boltdb)
+import (
+	"fmt"
+	"os"
+	"sync"
 
-Go package with persistence provider for Proto Actor (Go) based on BoltDB.
+	"github.com/AsynkronIT/protoactor-go/actor"
+	"github.com/AsynkronIT/protoactor-go/persistence"
+	"github.com/artyomturkin/protoactor-go-persistence-boltdb"
+	"github.com/boltdb/bolt"
+)
 
-## Get started
-
-Install package
-
-```
-go get github.com/artyomturkin/protoactor-go-persistence-boltdb
-```
-
-Create event and snapshot proto messages. Messages can be named differently.
-```protobuf
-syntax = "proto3";
-package main;
-
-message Event {
-    string state = 1;
-}
-
-message Snapshot {
-    string state = 1;
-}
-```
-
-Generate go types from proto file
-```
-protoc --gogoslick_out=. test.proto
-```
-
-Create DataStore implementation
-```go
+//DataStore
 type exampleDataStore struct {
 	providerState persistence.ProviderState
 }
@@ -46,10 +25,8 @@ func newExampleDataStore(snapshotInterval int, db *bolt.DB) *exampleDataStore {
 		providerState: boltdb.NewBoltProvider(snapshotInterval, db),
 	}
 }
-```
 
-Create Actor with persistence implementation
-```go
+//Actor
 type exampleActor struct {
 	persistence.Mixin
 
@@ -84,35 +61,26 @@ func (a *exampleActor) Receive(ctx actor.Context) {
 		msg.wg.Done()
 	}
 }
-```
 
-Create actor.Producer implementation
-```go
 func exampleActorProducer() actor.Actor {
 	return &exampleActor{}
 }
-```
 
-In open bolt database and pass it to actor.Props
-```go
-func main() {
+func ExampleBoltProvider() {
+	tempPath := tempfile()
+	defer os.Remove(tempPath)
 	db, err := bolt.Open(tempPath, 0666, nil)
 	if err != nil {
 		panic(err)
 	}
 
+	wg := &sync.WaitGroup{}
+
 	props := actor.FromProducer(exampleActorProducer).
 		WithMiddleware(
 			persistence.Using(newExampleDataStore(4, db)),
 		)
-	............
-}
-```
 
-Spawn actor and send it some events to set state, ask actor to print its state
-```go
-func main() {
-	............
 	pid, err := actor.SpawnNamed(props, "example.actor")
 	if err != nil {
 		panic(err)
@@ -127,14 +95,7 @@ func main() {
 	wg.Add(1)
 	pid.Tell(&Print{wg: wg})
 	wg.Wait()
-	............
-}
-```
 
-Stop actor and db, then restart everything
-```go
-func main() {
-	............
 	//stop actor, close db and reopen it
 	pid.GracefulPoison()
 	db.Close()
@@ -163,11 +124,8 @@ func main() {
 	//stop actor, close db and reopen it
 	pid.GracefulPoison()
 	db.Close()
-}
-```
 
-Running example will output:
-```
-State is event-9
-State is event-9
-```
+	// Output:
+	// State is event-9
+	// State is event-9
+}
